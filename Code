@@ -1,0 +1,2396 @@
+# ============================================================
+# DermAI - Explainable Skin Condition Classification System
+# Complete Single Jupyter Notebook Cell
+#
+# Features:
+# 1. MobileNetV2 Transfer Learning
+# 2. Skin Condition Classification
+# 3. AI Analysis Card
+# 4. Confidence Gauge
+# 5. Prediction Probability Bars
+# 6. Original Image
+# 7. 224 x 224 Processed Image
+# 8. Clear Grad-CAM Explainability
+# 9. Top 3 Predictions
+# 10. Professional Gradio UI
+# ============================================================
+
+
+# ============================================================
+# 1. INSTALL REQUIRED LIBRARIES
+# ============================================================
+
+import sys
+import subprocess
+
+packages = [
+    "tensorflow",
+    "kagglehub",
+    "gradio",
+    "pillow",
+    "numpy",
+    "matplotlib",
+    "scikit-learn"
+]
+
+for package in packages:
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "-q", package]
+    )
+
+
+# ============================================================
+# 2. IMPORT LIBRARIES
+# ============================================================
+
+import os
+import numpy as np
+import tensorflow as tf
+import kagglehub
+import gradio as gr
+import matplotlib.pyplot as plt
+
+from PIL import Image
+
+from tensorflow.keras import layers
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.preprocessing import image_dataset_from_directory
+
+
+print("\nLibraries loaded successfully.")
+print("TensorFlow version:", tf.__version__)
+
+
+# ============================================================
+# 3. DOWNLOAD DATASET
+# ============================================================
+
+print("\nDownloading skin-condition dataset...")
+
+dataset_path = kagglehub.dataset_download(
+    "harishnivasagam/multi-class-skin-condition-image-dataset-msc-6"
+)
+
+print("\nDataset downloaded successfully!")
+print("Dataset location:")
+print(dataset_path)
+
+
+# ============================================================
+# 4. FIND DATASET FOLDER AUTOMATICALLY
+# ============================================================
+
+DATA_DIR = None
+
+for root, dirs, files in os.walk(dataset_path):
+
+    valid_class_folders = []
+
+    for d in dirs:
+
+        folder_path = os.path.join(root, d)
+
+        try:
+
+            image_count = sum(
+                1
+                for f in os.listdir(folder_path)
+                if f.lower().endswith(
+                    (
+                        ".jpg",
+                        ".jpeg",
+                        ".png",
+                        ".bmp",
+                        ".webp"
+                    )
+                )
+            )
+
+            if image_count > 10:
+                valid_class_folders.append(d)
+
+        except Exception:
+            continue
+
+    if len(valid_class_folders) >= 2:
+
+        DATA_DIR = root
+        break
+
+
+if DATA_DIR is None:
+
+    raise Exception(
+        "Could not automatically find dataset folders."
+    )
+
+
+print("\nDataset folder:")
+print(DATA_DIR)
+
+
+# ============================================================
+# 5. LOAD DATASET
+# ============================================================
+
+IMG_SIZE = (224, 224)
+
+BATCH_SIZE = 32
+
+SEED = 42
+
+
+print("\nLoading dataset...")
+
+
+train_ds = image_dataset_from_directory(
+
+    DATA_DIR,
+
+    validation_split=0.30,
+
+    subset="training",
+
+    seed=SEED,
+
+    image_size=IMG_SIZE,
+
+    batch_size=BATCH_SIZE
+
+)
+
+
+temp_ds = image_dataset_from_directory(
+
+    DATA_DIR,
+
+    validation_split=0.30,
+
+    subset="validation",
+
+    seed=SEED,
+
+    image_size=IMG_SIZE,
+
+    batch_size=BATCH_SIZE
+
+)
+
+
+# ============================================================
+# 6. DETECT CLASSES
+# ============================================================
+
+class_names = train_ds.class_names
+
+
+print("\nDetected Classes:")
+
+for i, name in enumerate(class_names):
+
+    print(
+        i + 1,
+        "->",
+        name
+    )
+
+
+# ============================================================
+# 7. SPLIT VALIDATION AND TEST DATA
+# ============================================================
+
+total_batches = tf.data.experimental.cardinality(
+    temp_ds
+).numpy()
+
+
+if total_batches < 2:
+
+    raise Exception(
+        "Not enough validation batches to create "
+        "validation and test datasets."
+    )
+
+
+test_batches = total_batches // 2
+
+
+test_ds = temp_ds.take(
+    test_batches
+)
+
+
+val_ds = temp_ds.skip(
+    test_batches
+)
+
+
+# ============================================================
+# 8. DATASET PERFORMANCE
+# ============================================================
+
+AUTOTUNE = tf.data.AUTOTUNE
+
+
+train_ds = train_ds.cache().shuffle(
+    1000
+).prefetch(
+    AUTOTUNE
+)
+
+
+val_ds = val_ds.cache().prefetch(
+    AUTOTUNE
+)
+
+
+test_ds = test_ds.cache().prefetch(
+    AUTOTUNE
+)
+
+
+# ============================================================
+# 9. DATA AUGMENTATION
+# ============================================================
+
+data_augmentation = Sequential(
+
+    [
+
+        layers.RandomFlip(
+            "horizontal"
+        ),
+
+        layers.RandomRotation(
+            0.1
+        ),
+
+        layers.RandomZoom(
+            0.1
+        )
+
+    ],
+
+    name="data_augmentation"
+
+)
+
+
+# ============================================================
+# 10. MOBILE NET V2 BASE MODEL
+# ============================================================
+
+print("\nBuilding AI model...")
+
+
+base_model = MobileNetV2(
+
+    input_shape=(
+        224,
+        224,
+        3
+    ),
+
+    include_top=False,
+
+    weights="imagenet"
+
+)
+
+
+# Freeze pretrained MobileNetV2 layers
+
+base_model.trainable = False
+
+
+# ============================================================
+# 11. NAMED CLASSIFICATION LAYERS
+# ============================================================
+
+gap_layer = layers.GlobalAveragePooling2D(
+
+    name="global_average_pooling"
+
+)
+
+
+dropout1 = layers.Dropout(
+
+    0.3,
+
+    name="dropout_1"
+
+)
+
+
+dense1 = layers.Dense(
+
+    128,
+
+    activation="relu",
+
+    name="dense_128"
+
+)
+
+
+dropout2 = layers.Dropout(
+
+    0.2,
+
+    name="dropout_2"
+
+)
+
+
+prediction_layer = layers.Dense(
+
+    len(class_names),
+
+    activation="softmax",
+
+    name="final_predictions"
+
+)
+
+
+# ============================================================
+# 12. COMPLETE MODEL
+# ============================================================
+
+model = Sequential(
+
+    [
+
+        layers.Input(
+
+            shape=(
+                224,
+                224,
+                3
+            ),
+
+            name="input_image"
+
+        ),
+
+        data_augmentation,
+
+        layers.Rescaling(
+
+            1.0 / 127.5,
+
+            offset=-1,
+
+            name="mobilenet_rescaling"
+
+        ),
+
+        base_model,
+
+        gap_layer,
+
+        dropout1,
+
+        dense1,
+
+        dropout2,
+
+        prediction_layer
+
+    ],
+
+    name="DermAI_MobileNetV2"
+
+)
+
+
+# ============================================================
+# 13. COMPILE MODEL
+# ============================================================
+
+model.compile(
+
+    optimizer="adam",
+
+    loss="sparse_categorical_crossentropy",
+
+    metrics=[
+        "accuracy"
+    ]
+
+)
+
+
+# ============================================================
+# 14. MODEL SUMMARY
+# ============================================================
+
+print("\nModel created successfully.")
+
+print("\nClasses:")
+print(class_names)
+
+print("\nModel Summary:")
+
+model.summary()
+
+
+# ============================================================
+# 15. TRAIN MODEL
+# ============================================================
+
+print("\n==========================================")
+print("          TRAINING DERMAI")
+print("==========================================")
+
+print("\nPlease wait...\n")
+
+
+history = model.fit(
+
+    train_ds,
+
+    validation_data=val_ds,
+
+    epochs=5,
+
+    verbose=1
+
+)
+
+
+# ============================================================
+# 16. TEST MODEL
+# ============================================================
+
+print("\nEvaluating model...")
+
+
+test_loss, test_accuracy = model.evaluate(
+
+    test_ds,
+
+    verbose=0
+
+)
+
+
+print("\n===================================")
+print("        DERMAI RESULTS")
+print("===================================")
+
+print(
+    f"Test Accuracy : {test_accuracy * 100:.2f}%"
+)
+
+print(
+    f"Test Loss     : {test_loss:.4f}"
+)
+
+print("===================================")
+
+
+# ============================================================
+# 17. SAVE MODEL
+# ============================================================
+
+os.makedirs(
+
+    "models",
+
+    exist_ok=True
+
+)
+
+
+MODEL_PATH = (
+
+    "models/dermAI_model.keras"
+
+)
+
+
+model.save(
+
+    MODEL_PATH
+
+)
+
+
+print("\nModel saved successfully.")
+
+print(
+    "Model path:",
+    MODEL_PATH
+)
+
+
+# ============================================================
+# 18. FIND LAST CONVOLUTIONAL LAYER
+# ============================================================
+
+last_conv_layer = None
+
+
+for layer in reversed(
+    base_model.layers
+):
+
+    if isinstance(
+        layer,
+        tf.keras.layers.Conv2D
+    ):
+
+        last_conv_layer = layer
+
+        break
+
+
+if last_conv_layer is None:
+
+    raise ValueError(
+        "Could not find convolutional layer "
+        "for Grad-CAM."
+    )
+
+
+print("\nGrad-CAM layer:")
+print(last_conv_layer.name)
+
+
+# ============================================================
+# 19. CREATE GRAD-CAM MODEL
+# ============================================================
+
+grad_model = Model(
+
+    inputs=base_model.input,
+
+    outputs=[
+        last_conv_layer.output,
+        base_model.output
+    ]
+
+)
+
+
+# ============================================================
+# 20. IMPROVED GRAD-CAM FUNCTION
+# ============================================================
+
+def generate_gradcam(
+
+    image_array,
+
+    predicted_index
+
+):
+
+    """
+    Generates a clear Grad-CAM visualization.
+
+    Original image = 80%
+    Heatmap        = 20%
+
+    This keeps the skin image clearly visible.
+    """
+
+    # --------------------------------------------------------
+    # Convert image to float32
+    # --------------------------------------------------------
+
+    image_array = image_array.astype(
+        np.float32
+    )
+
+
+    # --------------------------------------------------------
+    # MobileNetV2 preprocessing
+    # Range: -1 to +1
+    # --------------------------------------------------------
+
+    normalized_image = (
+
+        image_array / 127.5
+
+    ) - 1.0
+
+
+    normalized_image = np.expand_dims(
+
+        normalized_image,
+
+        axis=0
+
+    )
+
+
+    normalized_image = tf.convert_to_tensor(
+
+        normalized_image,
+
+        dtype=tf.float32
+
+    )
+
+
+    # --------------------------------------------------------
+    # Calculate gradients
+    # --------------------------------------------------------
+
+    with tf.GradientTape() as tape:
+
+        conv_outputs, base_outputs = grad_model(
+
+            normalized_image,
+
+            training=False
+
+        )
+
+
+        # ----------------------------------------------------
+        # Classification head
+        # ----------------------------------------------------
+
+        x = gap_layer(
+            base_outputs
+        )
+
+        x = dropout1(
+            x,
+            training=False
+        )
+
+        x = dense1(
+            x
+        )
+
+        x = dropout2(
+            x,
+            training=False
+        )
+
+        predictions = prediction_layer(
+            x
+        )
+
+
+        # Selected class score
+
+        class_score = predictions[
+
+            :,
+
+            predicted_index
+
+        ]
+
+
+    # --------------------------------------------------------
+    # Gradients
+    # --------------------------------------------------------
+
+    gradients = tape.gradient(
+
+        class_score,
+
+        conv_outputs
+
+    )
+
+
+    if gradients is None:
+
+        raise ValueError(
+            "Could not calculate Grad-CAM gradients."
+        )
+
+
+    # --------------------------------------------------------
+    # Average gradients
+    # --------------------------------------------------------
+
+    pooled_gradients = tf.reduce_mean(
+
+        gradients,
+
+        axis=(1, 2)
+
+    )
+
+
+    # Remove batch dimension
+
+    conv_outputs = conv_outputs[0]
+
+    pooled_gradients = pooled_gradients[0]
+
+
+    # --------------------------------------------------------
+    # Weight feature maps
+    # --------------------------------------------------------
+
+    heatmap = tf.reduce_sum(
+
+        conv_outputs *
+        pooled_gradients,
+
+        axis=-1
+
+    )
+
+
+    # --------------------------------------------------------
+    # ReLU
+    # --------------------------------------------------------
+
+    heatmap = tf.maximum(
+
+        heatmap,
+
+        0
+
+    )
+
+
+    # --------------------------------------------------------
+    # Normalize heatmap
+    # --------------------------------------------------------
+
+    max_value = tf.reduce_max(
+
+        heatmap
+
+    )
+
+
+    if float(max_value) > 0:
+
+        heatmap = (
+
+            heatmap /
+            max_value
+
+        )
+
+
+    heatmap = heatmap.numpy()
+
+
+    # --------------------------------------------------------
+    # Resize heatmap to 224 x 224
+    # --------------------------------------------------------
+
+    heatmap_image = Image.fromarray(
+
+        np.uint8(
+            heatmap * 255
+        )
+
+    )
+
+
+    heatmap_image = heatmap_image.resize(
+
+        (
+            224,
+            224
+        ),
+
+        Image.Resampling.BILINEAR
+
+    )
+
+
+    heatmap = np.array(
+
+        heatmap_image
+
+    ).astype(
+        np.float32
+    ) / 255.0
+
+
+    # --------------------------------------------------------
+    # Improve heatmap visibility
+    # --------------------------------------------------------
+
+    # Remove very weak activations.
+    # This prevents the entire image becoming colored.
+
+    heatmap = np.where(
+
+        heatmap > 0.20,
+
+        heatmap,
+
+        0
+
+    )
+
+
+    # --------------------------------------------------------
+    # Convert heatmap to RGB
+    # --------------------------------------------------------
+
+    colored_heatmap = plt.cm.jet(
+
+        heatmap
+
+    )[:, :, :3]
+
+
+    colored_heatmap = (
+
+        colored_heatmap *
+        255
+
+    ).astype(
+        np.uint8
+    )
+
+
+    # --------------------------------------------------------
+    # Original image
+    # --------------------------------------------------------
+
+    original = (
+
+        image_array
+        .clip(0, 255)
+        .astype(np.uint8)
+
+    )
+
+
+    # --------------------------------------------------------
+    # CLEAR OVERLAY
+    #
+    # Original image = 80%
+    # Heatmap        = 20%
+    # --------------------------------------------------------
+
+    overlay = (
+
+        0.80 * original.astype(np.float32)
+
+        +
+
+        0.20 * colored_heatmap.astype(np.float32)
+
+    )
+
+
+    # --------------------------------------------------------
+    # Convert to uint8
+    # --------------------------------------------------------
+
+    overlay = np.clip(
+
+        overlay,
+
+        0,
+
+        255
+
+    ).astype(
+        np.uint8
+    )
+
+
+    return overlay
+
+
+# ============================================================
+# 21. CONDITION COLORS
+# ============================================================
+
+condition_colors = {
+
+    "acne":
+        "#ef4444",
+
+    "eczema":
+        "#f97316",
+
+    "dark spots":
+        "#eab308",
+
+    "rosacea":
+        "#a855f7",
+
+    "wrinkles":
+        "#3b82f6",
+
+    "normal skin":
+        "#22c55e"
+
+}
+
+
+def get_condition_color(
+
+    condition
+
+):
+
+    condition_lower = (
+
+        condition.lower()
+
+    )
+
+
+    for key, color in condition_colors.items():
+
+        if key in condition_lower:
+
+            return color
+
+
+    return "#6366f1"
+
+
+# ============================================================
+# 22. AI ANALYSIS CARD
+# ============================================================
+
+def create_analysis_card(
+
+    condition,
+
+    confidence
+
+):
+
+    confidence_percent = confidence
+
+
+    if confidence_percent >= 75:
+
+        status = "High Confidence"
+
+        status_color = "#22c55e"
+
+
+    elif confidence_percent >= 50:
+
+        status = "Moderate Confidence"
+
+        status_color = "#f59e0b"
+
+
+    else:
+
+        status = "Low Confidence"
+
+        status_color = "#ef4444"
+
+
+    condition_color = get_condition_color(
+
+        condition
+
+    )
+
+
+    return f"""
+
+    <div style="
+
+        background:
+        linear-gradient(
+            135deg,
+            {condition_color}18,
+            {condition_color}08
+        );
+
+        border:1px solid {condition_color}55;
+
+        border-radius:20px;
+
+        padding:25px;
+
+        margin-bottom:15px;
+
+        text-align:center;
+
+    ">
+
+        <div style="
+
+            font-size:14px;
+
+            opacity:0.65;
+
+            margin-bottom:8px;
+
+            text-transform:uppercase;
+
+            letter-spacing:1px;
+
+        ">
+
+            AI Analysis
+
+        </div>
+
+
+        <div style="
+
+            font-size:16px;
+
+            opacity:0.7;
+
+            margin-top:5px;
+
+        ">
+
+            Predicted Condition
+
+        </div>
+
+
+        <div style="
+
+            font-size:30px;
+
+            font-weight:700;
+
+            color:{condition_color};
+
+            margin-top:5px;
+
+            margin-bottom:20px;
+
+        ">
+
+            {condition}
+
+        </div>
+
+
+        <div style="
+
+            margin-top:20px;
+
+            font-size:18px;
+
+        ">
+
+            Confidence:
+
+            <b>
+
+                {confidence_percent:.2f}%
+
+            </b>
+
+        </div>
+
+
+        <div style="
+
+            margin-top:10px;
+
+            color:{status_color};
+
+            font-weight:bold;
+
+            font-size:17px;
+
+        ">
+
+            {status}
+
+        </div>
+
+    </div>
+
+    """
+
+
+# ============================================================
+# 23. CONFIDENCE GAUGE
+# ============================================================
+
+def create_confidence_gauge(
+
+    confidence
+
+):
+
+    percentage = max(
+
+        0,
+
+        min(
+            100,
+            confidence
+        )
+
+    )
+
+
+    if percentage >= 75:
+
+        color = "#22c55e"
+
+
+    elif percentage >= 50:
+
+        color = "#f59e0b"
+
+
+    else:
+
+        color = "#ef4444"
+
+
+    return f"""
+
+    <div style="
+
+        display:flex;
+
+        justify-content:center;
+
+        align-items:center;
+
+        padding:15px;
+
+    ">
+
+
+        <div style="
+
+            width:150px;
+
+            height:150px;
+
+            border-radius:50%;
+
+            background:
+
+            conic-gradient(
+
+                {color}
+                {percentage}%,
+
+                #e5e7eb
+                {percentage}%
+
+            );
+
+            display:flex;
+
+            align-items:center;
+
+            justify-content:center;
+
+        ">
+
+
+            <div style="
+
+                width:115px;
+
+                height:115px;
+
+                border-radius:50%;
+
+                background:#111;
+
+                display:flex;
+
+                align-items:center;
+
+                justify-content:center;
+
+                color:white;
+
+                font-size:25px;
+
+                font-weight:bold;
+
+            ">
+
+                {percentage:.1f}%
+
+            </div>
+
+
+        </div>
+
+
+    </div>
+
+    """
+
+
+# ============================================================
+# 24. PREDICTION PROBABILITY BARS
+# ============================================================
+
+def create_probability_bars(
+
+    predictions
+
+):
+
+    html = """
+
+    <div style="
+
+        background:#18181b;
+
+        border-radius:15px;
+
+        padding:20px;
+
+        color:white;
+
+    ">
+
+
+        <h3 style="
+
+            margin-top:0;
+
+            margin-bottom:18px;
+
+        ">
+
+            Prediction Probability
+
+        </h3>
+
+    """
+
+
+    indices = np.argsort(
+
+        predictions
+
+    )[::-1]
+
+
+    for index in indices:
+
+        condition = class_names[index]
+
+        probability = float(
+
+            predictions[index] * 100
+
+        )
+
+        color = get_condition_color(
+
+            condition
+
+        )
+
+
+        html += f"""
+
+        <div style="
+
+            margin:15px 0;
+
+        ">
+
+
+            <div style="
+
+                display:flex;
+
+                justify-content:space-between;
+
+                margin-bottom:5px;
+
+            ">
+
+                <span>
+
+                    {condition}
+
+                </span>
+
+                <span>
+
+                    {probability:.2f}%
+
+                </span>
+
+            </div>
+
+
+            <div style="
+
+                background:#3f3f46;
+
+                height:12px;
+
+                border-radius:10px;
+
+                overflow:hidden;
+
+            ">
+
+
+                <div style="
+
+                    width:{probability}%;
+
+                    height:100%;
+
+                    background:{color};
+
+                    border-radius:10px;
+
+                ">
+
+                </div>
+
+
+            </div>
+
+
+        </div>
+
+        """
+
+
+    html += """
+
+    </div>
+
+    """
+
+
+    return html
+
+
+# ============================================================
+# 25. MAIN PREDICTION FUNCTION
+# ============================================================
+
+def predict_skin(
+
+    image
+
+):
+
+    if image is None:
+
+        empty = """
+
+        <div style="
+
+            padding:20px;
+
+        ">
+
+            Please upload a skin image.
+
+        </div>
+
+        """
+
+
+        return (
+
+            empty,
+            "",
+            "",
+            None,
+            None,
+            None,
+            ""
+
+        )
+
+
+    try:
+
+        # ====================================================
+        # Convert uploaded image to PIL
+        # ====================================================
+
+        if isinstance(
+
+            image,
+
+            Image.Image
+
+        ):
+
+            original_image = image.convert(
+
+                "RGB"
+
+            )
+
+
+        elif isinstance(
+
+            image,
+
+            np.ndarray
+
+        ):
+
+            original_image = Image.fromarray(
+
+                image.astype(
+                    np.uint8
+                )
+
+            ).convert(
+                "RGB"
+            )
+
+
+        else:
+
+            original_image = Image.open(
+
+                image
+
+            ).convert(
+                "RGB"
+            )
+
+
+        # ====================================================
+        # Keep original image
+        # ====================================================
+
+        original_image = (
+
+            original_image.copy()
+
+        )
+
+
+        # ====================================================
+        # Resize image
+        # ====================================================
+
+        processed_image = original_image.resize(
+
+            (
+                224,
+                224
+            ),
+
+            Image.Resampling.BILINEAR
+
+        )
+
+
+        # ====================================================
+        # Convert to NumPy
+        # ====================================================
+
+        image_array = np.array(
+
+            processed_image
+
+        ).astype(
+
+            np.float32
+
+        )
+
+
+        # ====================================================
+        # Add batch dimension
+        # ====================================================
+
+        input_array = np.expand_dims(
+
+            image_array,
+
+            axis=0
+
+        )
+
+
+        # ====================================================
+        # MODEL PREDICTION
+        # ====================================================
+
+        predictions = model.predict(
+
+            input_array,
+
+            verbose=0
+
+        )[0]
+
+
+        # ====================================================
+        # SAFETY CHECK
+        # ====================================================
+
+        if len(predictions) != len(
+
+            class_names
+
+        ):
+
+            raise ValueError(
+
+                f"Model returned "
+                f"{len(predictions)} predictions "
+                f"but there are "
+                f"{len(class_names)} classes."
+
+            )
+
+
+        # ====================================================
+        # PREDICTED INDEX
+        # ====================================================
+
+        predicted_index = int(
+
+            np.argmax(
+
+                predictions
+
+            )
+
+        )
+
+
+        # ====================================================
+        # PREDICTED CLASS
+        # ====================================================
+
+        predicted_class = class_names[
+
+            predicted_index
+
+        ]
+
+
+        # ====================================================
+        # CONFIDENCE
+        # ====================================================
+
+        confidence = float(
+
+            predictions[
+                predicted_index
+            ] * 100
+
+        )
+
+
+        # ====================================================
+        # AI ANALYSIS CARD
+        # ====================================================
+
+        analysis_card = (
+
+            create_analysis_card(
+
+                predicted_class,
+
+                confidence
+
+            )
+
+        )
+
+
+        # ====================================================
+        # CONFIDENCE GAUGE
+        # ====================================================
+
+        confidence_gauge = (
+
+            create_confidence_gauge(
+
+                confidence
+
+            )
+
+        )
+
+
+        # ====================================================
+        # PROBABILITY BARS
+        # ====================================================
+
+        probability_chart = (
+
+            create_probability_bars(
+
+                predictions
+
+            )
+
+        )
+
+
+        # ====================================================
+        # GRAD-CAM
+        # ====================================================
+
+        gradcam_image = generate_gradcam(
+
+            image_array,
+
+            predicted_index
+
+        )
+
+
+        # ====================================================
+        # TOP 3 PREDICTIONS
+        # ====================================================
+
+        top_indices = np.argsort(
+
+            predictions
+
+        )[::-1][:3]
+
+
+        top_text = (
+
+            "Top Predictions\n\n"
+
+        )
+
+
+        for rank, index in enumerate(
+
+            top_indices,
+
+            start=1
+
+        ):
+
+            top_text += (
+
+                f"{rank}. "
+                f"{class_names[index]} - "
+                f"{predictions[index] * 100:.2f}%\n"
+
+            )
+
+
+        # ====================================================
+        # RETURN ALL OUTPUTS
+        # ====================================================
+
+        return (
+
+            analysis_card,
+
+            confidence_gauge,
+
+            probability_chart,
+
+            np.array(
+                original_image
+            ),
+
+            image_array.astype(
+                np.uint8
+            ),
+
+            gradcam_image,
+
+            top_text
+
+        )
+
+
+    except Exception as e:
+
+        print(
+
+            "ERROR:",
+
+            repr(e)
+
+        )
+
+
+        error_html = f"""
+
+        <div style="
+
+            background:#ffe5e5;
+
+            padding:25px;
+
+            border-radius:20px;
+
+            color:#991b1b;
+
+        ">
+
+
+            <h3>
+
+                Unable to analyze image.
+
+            </h3>
+
+
+            <p>
+
+                {str(e)}
+
+            </p>
+
+
+        </div>
+
+        """
+
+
+        return (
+
+            error_html,
+
+            "",
+            "",
+            None,
+            None,
+            None,
+            ""
+
+        )
+
+
+# ============================================================
+# 26. PROFESSIONAL + COLORFUL UI CSS
+# ============================================================
+
+custom_css = """
+
+.gradio-container {
+
+    max-width:1250px !important;
+
+    margin:auto !important;
+
+    padding:25px !important;
+
+}
+
+
+#header {
+
+    text-align:center;
+
+    padding:25px 10px 20px 10px;
+
+    margin-bottom:20px;
+
+}
+
+
+#title {
+
+    font-size:44px;
+
+    font-weight:800;
+
+    letter-spacing:-1px;
+
+}
+
+
+#subtitle {
+
+    font-size:18px;
+
+    opacity:0.65;
+
+    margin-top:5px;
+
+}
+
+
+.card {
+
+    border-radius:20px !important;
+
+    padding:20px !important;
+
+}
+
+
+#analyze-button {
+
+    height:52px;
+
+    border-radius:12px;
+
+    font-size:17px;
+
+    font-weight:600;
+
+}
+
+
+#clear-button {
+
+    height:52px;
+
+    border-radius:12px;
+
+}
+
+
+.section-title {
+
+    font-size:20px;
+
+    font-weight:700;
+
+    margin-bottom:15px;
+
+}
+
+
+#footer {
+
+    text-align:center;
+
+    margin-top:25px;
+
+    padding:15px;
+
+    opacity:0.55;
+
+    font-size:14px;
+
+}
+
+
+#conditions {
+
+    text-align:center;
+
+    padding:22px;
+
+    margin-top:20px;
+
+    border-radius:18px;
+
+}
+
+"""
+
+
+# ============================================================
+# 27. CREATE GRADIO APPLICATION
+# ============================================================
+
+print("\nCreating DermAI application...")
+
+
+with gr.Blocks(
+
+    title="DermAI",
+
+    css=custom_css
+
+) as app:
+
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    gr.HTML(
+
+        """
+
+        <div id="header">
+
+            <div id="title">
+
+                DermAI
+
+            </div>
+
+
+            <div id="subtitle">
+
+                Explainable AI-Powered Skin Condition Classification
+
+            </div>
+
+        </div>
+
+        """
+
+    )
+
+
+    # ========================================================
+    # UPLOAD + ANALYSIS
+    # ========================================================
+
+    with gr.Row():
+
+
+        # ====================================================
+        # LEFT SIDE
+        # ====================================================
+
+        with gr.Column(
+
+            scale=1,
+
+            elem_classes="card"
+
+        ):
+
+
+            gr.Markdown(
+
+                "### Upload Skin Image"
+
+            )
+
+
+            image_input = gr.Image(
+
+                type="numpy",
+
+                label="Select an image",
+
+                sources=["upload"],
+
+                height=380
+
+            )
+
+
+            with gr.Row():
+
+
+                predict_button = gr.Button(
+
+                    "Analyze Skin",
+
+                    variant="primary",
+
+                    elem_id="analyze-button"
+
+                )
+
+
+                clear_button = gr.Button(
+
+                    "Clear",
+
+                    elem_id="clear-button"
+
+                )
+
+
+        # ====================================================
+        # RIGHT SIDE
+        # ====================================================
+
+        with gr.Column(
+
+            scale=1,
+
+            elem_classes="card"
+
+        ):
+
+
+            gr.Markdown(
+
+                "### AI Analysis"
+
+            )
+
+
+            analysis_output = gr.HTML()
+
+
+            confidence_output = gr.HTML()
+
+
+            probability_output = gr.HTML()
+
+
+    # ========================================================
+    # IMAGE PROCESSING VISUALIZATION
+    # ========================================================
+
+    gr.Markdown(
+
+        "## Image Processing & Explainability"
+
+    )
+
+
+    with gr.Row():
+
+
+        # ====================================================
+        # ORIGINAL IMAGE
+        # ====================================================
+
+        with gr.Column(
+
+            elem_classes="card"
+
+        ):
+
+
+            gr.Markdown(
+
+                "### Original Image"
+
+            )
+
+
+            original_output = gr.Image(
+
+                label="Uploaded Image",
+
+                interactive=False,
+
+                height=330
+
+            )
+
+
+        # ====================================================
+        # PROCESSED IMAGE
+        # ====================================================
+
+        with gr.Column(
+
+            elem_classes="card"
+
+        ):
+
+
+            gr.Markdown(
+
+                "### Model Input — 224 × 224"
+
+            )
+
+
+            processed_output = gr.Image(
+
+                label="Preprocessed Image",
+
+                interactive=False,
+
+                height=330
+
+            )
+
+
+    # ========================================================
+    # GRAD-CAM
+    # ========================================================
+
+    with gr.Column(
+
+        elem_classes="card"
+
+    ):
+
+
+        gr.Markdown(
+
+            "### AI Attention Map"
+
+        )
+
+
+        gr.Markdown(
+
+            """
+
+            Grad-CAM highlights the image regions that
+            contributed most strongly to the AI prediction.
+            The original image is intentionally kept visible
+            for easier interpretation.
+
+            """
+
+        )
+
+
+        gradcam_output = gr.Image(
+
+            label="Grad-CAM Visualization",
+
+            interactive=False,
+
+            height=450
+
+        )
+
+
+    # ========================================================
+    # TOP 3 PREDICTIONS
+    # ========================================================
+
+    with gr.Column(
+
+        elem_classes="card"
+
+    ):
+
+
+        gr.Markdown(
+
+            "### Top 3 Predictions"
+
+        )
+
+
+        top_predictions_output = gr.Textbox(
+
+            lines=4,
+
+            interactive=False,
+
+            show_label=False
+
+        )
+
+
+    # ========================================================
+    # SUPPORTED CONDITIONS
+    # ========================================================
+
+    gr.HTML(
+
+        """
+
+        <div id="conditions">
+
+            <h3>
+
+                Supported Skin Conditions
+
+            </h3>
+
+
+            <p>
+
+
+                <span style="
+                    color:#ef4444;
+                    font-weight:600;
+                ">
+
+                    Acne
+
+                </span>
+
+
+                &nbsp; • &nbsp;
+
+
+                <span style="
+                    color:#eab308;
+                    font-weight:600;
+                ">
+
+                    Dark Spots
+
+                </span>
+
+
+                &nbsp; • &nbsp;
+
+
+                <span style="
+                    color:#f97316;
+                    font-weight:600;
+                ">
+
+                    Eczema
+
+                </span>
+
+
+                &nbsp; • &nbsp;
+
+
+                <span style="
+                    color:#22c55e;
+                    font-weight:600;
+                ">
+
+                    Normal Skin
+
+                </span>
+
+
+                &nbsp; • &nbsp;
+
+
+                <span style="
+                    color:#a855f7;
+                    font-weight:600;
+                ">
+
+                    Rosacea
+
+                </span>
+
+
+                &nbsp; • &nbsp;
+
+
+                <span style="
+                    color:#3b82f6;
+                    font-weight:600;
+                ">
+
+                    Wrinkles
+
+                </span>
+
+
+            </p>
+
+        </div>
+
+        """
+
+    )
+
+
+    # ========================================================
+    # FOOTER
+    # ========================================================
+
+    gr.HTML(
+
+        """
+
+        <div id="footer">
+
+            DermAI
+
+        </div>
+
+        """
+
+    )
+
+
+    # ========================================================
+    # ANALYZE BUTTON
+    # ========================================================
+
+    predict_button.click(
+
+        fn=predict_skin,
+
+        inputs=image_input,
+
+        outputs=[
+
+            analysis_output,
+
+            confidence_output,
+
+            probability_output,
+
+            original_output,
+
+            processed_output,
+
+            gradcam_output,
+
+            top_predictions_output
+
+        ]
+
+    )
+
+
+    # ========================================================
+    # CLEAR BUTTON
+    # ========================================================
+
+    clear_button.click(
+
+        fn=lambda: (
+
+            None,
+            "",
+            "",
+            "",
+            None,
+            None,
+            None,
+            ""
+
+        ),
+
+        inputs=None,
+
+        outputs=[
+
+            image_input,
+
+            analysis_output,
+
+            confidence_output,
+
+            probability_output,
+
+            original_output,
+
+            processed_output,
+
+            gradcam_output,
+
+            top_predictions_output
+
+        ]
+
+    )
+
+
+# ============================================================
+# 28. LAUNCH APPLICATION
+# ============================================================
+
+print("\n==========================================")
+print("       DERMAI APPLICATION READY")
+print("==========================================")
+
+print("\nLaunching application...")
+
+print(
+    "Open the Gradio link shown below."
+)
+
+print("==========================================\n")
+
+
+app.launch()
